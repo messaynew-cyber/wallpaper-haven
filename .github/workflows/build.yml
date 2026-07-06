@@ -1,0 +1,77 @@
+name: Build wallpaper-haven
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.22.0"
+          channel: stable
+      - name: Bootstrap Flutter project
+        id: bootstrap
+        run: |
+          if [ ! -f "android/gradlew" ]; then
+            flutter create --platforms android . 2>&1 | tee bootstrap.log ||               echo "::warning ::Bootstrap failed — using existing android/ files. If the build fails, check android/gradlew."
+          fi
+        continue-on-error: true
+      - run: flutter pub get
+      - name: Build APK
+        id: build_apk
+        run: flutter build apk --release 2>&1 | tee build.log
+      - name: ✅ Build Succeeded
+        if: steps.build_apk.outcome == 'success'
+        run: echo "## ✅ Build Passed" >> $GITHUB_STEP_SUMMARY
+      - name: ❌ Capture Build Errors
+        if: steps.build_apk.outcome == 'failure'
+        run: |
+          echo "## ❌ Build Failed — flutter build apk" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -80 build.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -iE "error|Error|ERROR|fatal|FAIL" build.log | tail -15 | while read line; do
+            echo "::error ::${line}"
+          done
+          exit 1
+      - name: Upload build log (always — even on failure)
+        if: always()
+        run: |
+          touch build.log bootstrap.log 2>/dev/null
+          echo "Build artifacts ready for upload"
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build.log
+            bootstrap.log
+          retention-days: 1
+      - name: Upload APK Artifact
+        if: steps.build_apk.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+      - name: Publish Nightly Release
+        if: steps.build_apk.outcome == 'success'
+        env:
+          GH_TOKEN: \${ secrets.GITHUB_TOKEN }
+        run: |
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          git push origin :refs/tags/nightly 2>/dev/null || true
+          gh release create nightly build/app/outputs/flutter-apk/app-release.apk \
+            --title "Nightly Build" --prerelease \
+            --notes "Automated build from CI."
